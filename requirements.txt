@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""
+Minimal Tariff Change Probability Dashboard
+Works with basic dependencies only
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import requests
+import feedparser
+from datetime import datetime, timedelta
+import plotly.graph_objects as go
+import plotly.express as px
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import List, Dict, Tuple
+
+@dataclass
+class Article:
+    """Data class for storing article information"""
+    title: str
+    content: str
+    source: str
+    url: str
+    timestamp: datetime
+    sentiment: float = 0.0
+    relevance: float = 0.0
+
+class SimpleTariffMonitor:
+    """Simplified tariff monitoring without heavy NLP dependencies"""
+    
+    def __init__(self):
+        self.source_weights = {
+            'reuters': 0.95,
+            'bloomberg': 0.93,
+            'wsj': 0.91,
+            'ft': 0.90,
+            'politico': 0.85,
+            'cnbc': 0.80,
+            'generic': 0.70
+        }
+        
+        self.tariff_keywords = [
+            'tariff', 'trade war', 'import duty', 'export tax', 
+            'customs', 'trade policy', 'trade agreement', 'USMCA',
+            'trade deal', 'sanctions', 'quota', 'WTO'
+        ]
+        
+        self.food_keywords = [
+            'agricultural', 'food', 'produce', 'fruit', 'berry',
+            'frozen', 'import', 'export', 'FDA', 'USDA'
+        ]
+        
+        self.articles = []
+    
+    def get_source_weight(self, url: str) -> float:
+        """Get credibility weight for a source"""
+        url_lower = url.lower()
+        for domain, weight in self.source_weights.items():
+            if domain in url_lower:
+                return weight
+        return self.source_weights['generic']
+    
+    def calculate_relevance(self, text: str) -> float:
+        """Calculate relevance score based on keyword presence"""
+        text_lower = text.lower()
+        
+        tariff_score = sum(1 for keyword in self.tariff_keywords 
+                          if keyword in text_lower)
+        food_score = sum(0.5 for keyword in self.food_keywords 
+                        if keyword in text_lower)
+        
+        total_score = (tariff_score + food_score) / 10
+        return min(1.0, total_score)
+    
+    def simple_sentiment(self, text: str) -> float:
+        """Simple sentiment analysis based on keywords"""
+        text_lower = text.lower()
+        
+        negative_words = ['impose', 'increase', 'raise', 'threat', 'war', 
+                         'retaliate', 'sanction', 'restrict', 'barrier']
+        positive_words = ['reduce', 'eliminate', 'free', 'agreement', 
+                         'negotiate', 'lower', 'remove']
+        
+        neg_count = sum(1 for word in negative_words if word in text_lower)
+        pos_count = sum(1 for word in positive_words if word in text_lower)
+        
+        # More negative words = higher probability of changes
+        if neg_count + pos_count == 0:
+            return 0.5
+        
+        sentiment = (neg_count - pos_count + 10) / 20
+        return max(0, min(1, sentiment))
+    
+    def extract_domain(self, url: str) -> str:
+        """Simple domain extraction"""
+        try:
+            domain = url.split('/')[2]
+            return domain.replace('www.', '')
+        except:
+            return "unknown"
+    
+    def scrape_google_news(self, query="tariff trade", max_articles=10) -> List[Article]:
+        """Scrape news from Google News RSS feed"""
+        feed_url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
+        
+        try:
+            feed = feedparser.parse(feed_url)
+            articles = []
+            
+            for entry in feed.entries[:max_articles]:
+                try:
+                    pub_date = datetime(*entry.published_parsed[:6])
+                except:
+                    pub_date = datetime.now()
+                
+                content = entry.get('summary', '')
+                
+                article = Article(
+                    title=entry.title,
+                    content=content,
+                    source=self.extract_domain(entry.link),
+                    url=entry.link,
+                    timestamp=pub_date
+                )
+                articles.append(article)
+            
+            return articles
+        except Exception as e:
+            st.error(f"Error fetching news: {e}")
+            return []
+    
+    def collect_articles(self) -> None:
+        """Collect articles from Google News"""
+        self.articles = []
+        
+        queries = [
+            "tariff trade policy",
+            "import duty agricultural",
+            "trade war food"
+        ]
+        
+        with st.spinner("Fetching news articles..."):
+            for query in queries:
+                self.articles.extend(self.scrape_google_news(query, max_articles=5))
+        
+        # Remove duplicates
+        seen_urls = set()
+        unique_articles = []
+        for article in self.articles:
+            if article.url not in seen_urls:
+                seen_urls.add(article.url)
+                unique_articles.append(article)
+        
+        self.articles = unique_articles
+        
+        # Analyze articles
+        for article in self.articles:
+            article.sentiment = self.simple_sentiment(article.title + " " + article.content)
+            article.relevance = self.calculate_relevance(article.title + " " + article.content)
+    
+    def calculate_probability(self) -> float:
+        """Calculate overall probability"""
+        if not self.articles:
+            return 0.0
+        
+        relevant_articles = [a for a in self.articles if a.relevance > 0.1]
+        if not relevant_articles:
+            return 0.0
+        
+        scores = []
+        for article in relevant_articles:
+            age_hours = (datetime.now() - article.timestamp).total_seconds() / 3600
+            recency_weight = np.exp(-age_hours / 168)
+            source_weight = self.get_source_weight(article.url)
+            
+            score = article.sentiment * article.relevance * source_weight * recency_weight
+            scores.append(score)
+        
+        probability = np.mean(scores) if scores else 0.0
+        return min(1.0, probability)
+
+def create_minimal_dashboard():
+    """Create Streamlit dashboard with minimal dependencies"""
+    st.set_page_config(
+        page_title="Tariff Monitor - Minimal",
+        page_icon="📊",
+        layout="wide"
+    )
+    
+    st.title("📊 Tariff Change Monitor - Minimal Version")
+    st.caption("Live news monitoring with basic dependencies")
+    
+    if 'monitor' not in st.session_state:
+        st.session_state.monitor = SimpleTariffMonitor()
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("Controls")
+        
+        if st.button("🔄 Refresh Data", type="primary"):
+            st.session_state.monitor.collect_articles()
+            st.session_state.last_update = datetime.now()
+    
+    # Main content
+    if st.session_state.monitor.articles:
+        probability = st.session_state.monitor.calculate_probability()
+        
+        # Metrics
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Probability", f"{probability*100:.1f}%")
+        
+        with col2:
+            st.metric("Articles", len(st.session_state.monitor.articles))
+        
+        with col3:
+            risk = "High" if probability > 0.5 else "Low"
+            st.metric("Risk Level", risk)
+        
+        # Articles
+        st.header("Recent Articles")
+        for article in st.session_state.monitor.articles[:10]:
+            with st.expander(f"{article.title[:80]}..."):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**Source:** {article.source}")
+                    st.write(f"**Relevance:** {article.relevance:.2f}")
+                with col2:
+                    st.write(f"**Sentiment:** {article.sentiment:.2f}")
+                    st.write(f"**Time:** {article.timestamp.strftime('%Y-%m-%d %H:%M')}")
+                st.write(f"[Read more]({article.url})")
+    else:
+        st.info("Click 'Refresh Data' to start monitoring")
+
+if __name__ == "__main__":
+    create_minimal_dashboard()
